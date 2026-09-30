@@ -11,19 +11,26 @@ namespace Yita.Hooks;
 internal sealed class GlobalHotkeyManager : IDisposable
 {
     private const int TranslateClipboardHotkeyId = 0x4954;
+    private const int TranslateSelectionHotkeyId = 0x4955;
     private const uint VirtualKeyT = 0x54;
+    private const uint VirtualKeyD = 0x44;
     private readonly object _lifecycleSync = new();
     private readonly TaskCompletionSource<Exception?> _startup = new(
         TaskCreationOptions.RunContinuationsAsynchronously);
     private Thread? _messageThread;
     private uint _messageThreadId;
+    private int _isSelectionHotkeyRegistered;
     private bool _disposed;
 
     public event Action? TranslateClipboardRequested;
 
+    public event Action? TranslateSelectionRequested;
+
     public event Action? HotkeyStoppedUnexpectedly;
 
     public bool IsRunning => Volatile.Read(ref _messageThreadId) != 0;
+
+    public bool IsSelectionHotkeyRegistered => Volatile.Read(ref _isSelectionHotkeyRegistered) != 0;
 
     public void Start()
     {
@@ -58,7 +65,8 @@ internal sealed class GlobalHotkeyManager : IDisposable
 
     private void MessageThreadMain()
     {
-        var isRegistered = false;
+        var isClipboardRegistered = false;
+        var isSelectionRegistered = false;
         try
         {
             var threadId = NativeMethods.GetCurrentThreadId();
@@ -81,15 +89,25 @@ internal sealed class GlobalHotkeyManager : IDisposable
                 }
             }
 
-            isRegistered = NativeMethods.RegisterHotKey(
+            isClipboardRegistered = NativeMethods.RegisterHotKey(
                 IntPtr.Zero,
                 TranslateClipboardHotkeyId,
                 NativeMethods.ModControl | NativeMethods.ModShift | NativeMethods.ModNoRepeat,
                 VirtualKeyT);
-            if (!isRegistered)
+            if (!isClipboardRegistered)
             {
                 throw new Win32Exception(Marshal.GetLastWin32Error());
             }
+
+            isSelectionRegistered = NativeMethods.RegisterHotKey(
+                IntPtr.Zero,
+                TranslateSelectionHotkeyId,
+                NativeMethods.ModControl | NativeMethods.ModShift | NativeMethods.ModNoRepeat,
+                VirtualKeyD);
+            // The selection hotkey is best-effort. If another application
+            // already owns Ctrl+Shift+D, keep the clipboard hotkey alive and
+            // expose the partial state instead of failing the whole manager.
+            Volatile.Write(ref _isSelectionHotkeyRegistered, isSelectionRegistered ? 1 : 0);
         }
         catch (Exception exception)
         {
@@ -102,8 +120,13 @@ internal sealed class GlobalHotkeyManager : IDisposable
         {
             while (NativeMethods.GetMessage(out var message, IntPtr.Zero, 0, 0) > 0)
             {
-                if (message.Value == NativeMethods.WmHotKey
-                    && unchecked((int)message.WParam.ToUInt64()) == TranslateClipboardHotkeyId)
+                if (message.Value != NativeMethods.WmHotKey)
+                {
+                    continue;
+                }
+
+                var hotkeyId = unchecked((int)message.WParam.ToUInt64());
+                if (hotkeyId == TranslateClipboardHotkeyId)
                 {
                     try
                     {
@@ -114,13 +137,29 @@ internal sealed class GlobalHotkeyManager : IDisposable
                         // A subscriber failure must not terminate the native loop.
                     }
                 }
+                else if (hotkeyId == TranslateSelectionHotkeyId)
+                {
+                    try
+                    {
+                        TranslateSelectionRequested?.Invoke();
+                    }
+                    catch (Exception)
+                    {
+                        // A subscriber failure must not terminate the native loop.
+                    }
+                }
             }
         }
         finally
         {
-            if (isRegistered)
+            if (isClipboardRegistered)
             {
                 NativeMethods.UnregisterHotKey(IntPtr.Zero, TranslateClipboardHotkeyId);
+            }
+
+            if (isSelectionRegistered)
+            {
+                NativeMethods.UnregisterHotKey(IntPtr.Zero, TranslateSelectionHotkeyId);
             }
 
             var notifyUnexpectedStop = false;

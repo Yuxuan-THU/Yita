@@ -14,6 +14,7 @@ namespace Yita.Services;
 internal sealed class SelectionTranslationCoordinator : IDisposable
 {
     private static readonly TimeSpan SelectionReadTimeout = TimeSpan.FromMilliseconds(4000);
+    private static readonly TimeSpan PendingSelectionWaitTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan TranslationTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan FirstContentTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan StreamIdleTimeout = TimeSpan.FromSeconds(15);
@@ -46,6 +47,12 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
     private readonly Dictionary<long, CancellationTokenSource> _retranslations = new();
     private readonly Dictionary<long, CancellationTokenSource> _detachedSelections = new();
     private readonly HashSet<long> _runningSelections = new();
+    private readonly object _pendingSelectionSync = new();
+    private string? _pendingSelectionText;
+    private string? _pendingSelectionContext;
+    private ScreenPoint _pendingSelectionAnchor;
+    private bool _hasPendingSelection;
+    private Task _selectionCapture = Task.CompletedTask;
     private bool _disposed;
 
     public SelectionTranslationCoordinator(
@@ -114,6 +121,82 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
             DispatcherPriority.Send);
     }
 
+    /// <summary>
+    /// Translates the most recently captured mouse selection, waiting briefly
+    /// for an in-flight selection capture when the user presses the hotkey
+    /// immediately after releasing the mouse.
+    /// </summary>
+    public async Task<bool> TranslatePendingSelectionAsync()
+    {
+        if (_disposed)
+        {
+            return false;
+        }
+
+        if (TryConsumePendingSelection(out var text, out var context, out var anchor))
+        {
+            StartPendingTranslation(text, context, anchor);
+            return true;
+        }
+
+        var capture = _selectionCapture;
+        if (!capture.IsCompleted)
+        {
+            try
+            {
+                await capture.WaitAsync(PendingSelectionWaitTimeout).ConfigureAwait(false);
+            }
+            catch (Exception)
+            {
+                // Capture failures are already logged inside CaptureSelectionAsync.
+            }
+        }
+
+        if (TryConsumePendingSelection(out text, out context, out anchor))
+        {
+            StartPendingTranslation(text, context, anchor);
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryConsumePendingSelection(out string text, out string? context, out ScreenPoint anchor)
+    {
+        lock (_pendingSelectionSync)
+        {
+            if (!_hasPendingSelection || string.IsNullOrWhiteSpace(_pendingSelectionText))
+            {
+                text = string.Empty;
+                context = null;
+                anchor = default;
+                return false;
+            }
+
+            text = _pendingSelectionText;
+            context = _pendingSelectionContext;
+            anchor = _pendingSelectionAnchor;
+            _hasPendingSelection = false;
+            _pendingSelectionText = null;
+            _pendingSelectionContext = null;
+            _pendingSelectionAnchor = default;
+            return true;
+        }
+    }
+
+    private void StartPendingTranslation(string text, string? context, ScreenPoint anchor)
+    {
+        var lease = _requestGate.BeginRequest();
+        TrackSelection(lease.Version);
+        _ = ProcessExplicitTextAsync(
+            text,
+            anchor,
+            _getSettings(),
+            lease,
+            TranslationTrigger.Selection,
+            context);
+    }
+
     private void OnSelectionGestureCompleted(SelectionGesture gesture)
     {
         _dispatcher.BeginInvoke(
@@ -154,120 +237,119 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
 
         var lease = _requestGate.BeginRequest();
         TrackSelection(lease.Version);
-        _ = ProcessSelectionAsync(gesture, settings, lease);
+        _selectionCapture = CaptureSelectionAsync(gesture, settings, lease);
     }
 
-    private async Task ProcessSelectionAsync(
+    private async Task CaptureSelectionAsync(
         SelectionGesture gesture,
         AppSettings settings,
         RequestLease lease)
     {
-        var performance = _performanceMonitor.Begin(
-            TranslationTrigger.Selection,
-            settings.ProviderId);
-        var outcome = TranslationOutcome.Cancelled;
         try
         {
-            if (settings.SelectionDelayMilliseconds > 0)
-            {
-                await Task.Delay(settings.SelectionDelayMilliseconds, lease.CancellationToken).ConfigureAwait(false);
-            }
-
-            var selectionReadStartedAt = Stopwatch.GetTimestamp();
-            SelectionCapture? capture;
-            using var selectionReadCancellation = CancellationTokenSource.CreateLinkedTokenSource(lease.CancellationToken);
-            selectionReadCancellation.CancelAfter(SelectionReadTimeout);
-            try
-            {
-                capture = _selectionReader is IContextualSelectionReader contextualReader
-                    ? await contextualReader
-                        .TryReadSelectionAsync(
-                            gesture.End,
-                            settings.UseSelectionContext,
-                            selectionReadCancellation.Token)
-                        .WaitAsync(SelectionReadTimeout, lease.CancellationToken)
-                        .ConfigureAwait(false)
-                    : await ReadPlainSelectionAsync(
-                            _selectionReader,
-                            gesture.End,
-                            selectionReadCancellation.Token)
-                        .WaitAsync(SelectionReadTimeout, lease.CancellationToken)
-                        .ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (selectionReadCancellation.IsCancellationRequested
-                                                       && !lease.CancellationToken.IsCancellationRequested)
-            {
-                throw new TimeoutException("Selection read budget expired.");
-            }
-            finally
-            {
-                // End the actual provider operation too, not only the wait for
-                // it. Otherwise a timed-out PDF read can hold its PID slot and
-                // make later selections in the same browser look permanently dead.
-                selectionReadCancellation.Cancel();
-                performance.MarkSelectionRead(Stopwatch.GetElapsedTime(selectionReadStartedAt));
-            }
-            var selectedText = capture?.Text;
+            var capture = await ReadSelectionCaptureAsync(
+                    gesture,
+                    settings,
+                    lease.CancellationToken)
+                .ConfigureAwait(false);
             if (!_requestGate.IsCurrent(lease.Version))
             {
                 return;
             }
+
+            var selectedText = capture?.Text;
             if (string.IsNullOrWhiteSpace(selectedText))
             {
-                outcome = TranslationOutcome.NoSelection;
                 return;
             }
 
-            var targetLanguage = LanguageDirectionResolver.ResolveTargetLanguage(selectedText, settings);
-            outcome = await TranslateResolvedTextAsync(
-                    lease.Version,
-                    selectedText,
-                    capture?.Context,
-                    settings.SourceLanguage,
-                    targetLanguage,
-                    gesture.PopupAnchor,
-                    settings,
-                    lease.CancellationToken,
-                    () => IsSelectionRequestActive(lease.Version),
-                    performance)
-                .ConfigureAwait(false);
+            StorePendingSelection(selectedText, capture?.Context, gesture.PopupAnchor);
         }
         catch (OperationCanceledException) when (lease.CancellationToken.IsCancellationRequested)
         {
         }
-        catch (OperationCanceledException exception)
-        {
-            outcome = TranslationOutcome.Failed;
-            Debug.WriteLine($"Yita selection request ended unexpectedly: {exception}");
-            await FailPopupIfCurrentAsync(lease.Version, Localize(settings, "The translation ended unexpectedly. Try again.", "翻译请求意外中断，请重试。"));
-        }
-        catch (TimeoutException)
-        {
-            outcome = TranslationOutcome.Failed;
-            Debug.WriteLine("Yita: selection read timed out.");
-            await FailPopupIfCurrentAsync(lease.Version, Localize(settings, "Reading the selection timed out. Select the text again.", "读取选中文字超时，请重新选择。"));
-        }
-        catch (TranslationProviderException exception)
-        {
-            outcome = TranslationOutcome.Failed;
-            Debug.WriteLine($"Yita translation provider failed: {exception}");
-            if (IsSelectionRequestActive(lease.Version))
-            {
-                var message = UiLanguageCatalog.LocalizeProviderError(settings.UiLanguage, exception.Message);
-                await FailPopupIfCurrentAsync(lease.Version, message);
-                TranslationFailed?.Invoke(message);
-            }
-        }
         catch (Exception exception)
         {
-            outcome = TranslationOutcome.Failed;
-            Debug.WriteLine($"Yita selection pipeline failed: {exception}");
-            await FailPopupIfCurrentAsync(lease.Version, Localize(settings, "Translation failed. Check the network and try again.", "翻译失败，请检查网络后重试。"));
+            Debug.WriteLine($"Yita selection capture failed: {exception}");
         }
         finally
         {
-            performance.Complete(outcome);
             CompleteSelection(lease.Version);
+        }
+    }
+
+    private async Task<SelectionCapture?> ReadSelectionCaptureAsync(
+        SelectionGesture gesture,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        if (settings.SelectionDelayMilliseconds > 0)
+        {
+            await Task.Delay(settings.SelectionDelayMilliseconds, cancellationToken).ConfigureAwait(false);
+        }
+
+        var retryDelays = new[]
+        {
+            TimeSpan.FromMilliseconds(180),
+            TimeSpan.FromMilliseconds(360),
+        };
+
+        for (var attempt = 0; ; attempt++)
+        {
+            var capture = await ReadSelectionCaptureOnceAsync(
+                    gesture,
+                    settings,
+                    cancellationToken)
+                .ConfigureAwait(false);
+            if (capture is not null)
+            {
+                return capture;
+            }
+
+            if (attempt >= retryDelays.Length)
+            {
+                return null;
+            }
+
+            await Task.Delay(retryDelays[attempt], cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private async Task<SelectionCapture?> ReadSelectionCaptureOnceAsync(
+        SelectionGesture gesture,
+        AppSettings settings,
+        CancellationToken cancellationToken)
+    {
+        using var selectionReadCancellation = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        selectionReadCancellation.CancelAfter(SelectionReadTimeout);
+        try
+        {
+            return _selectionReader is IContextualSelectionReader contextualReader
+                ? await contextualReader
+                    .TryReadSelectionAsync(
+                        gesture.End,
+                        settings.UseSelectionContext,
+                        selectionReadCancellation.Token)
+                    .WaitAsync(SelectionReadTimeout, cancellationToken)
+                    .ConfigureAwait(false)
+                : await ReadPlainSelectionAsync(
+                        _selectionReader,
+                        gesture.End,
+                        selectionReadCancellation.Token)
+                    .WaitAsync(SelectionReadTimeout, cancellationToken)
+                    .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (selectionReadCancellation.IsCancellationRequested
+                                                   && !cancellationToken.IsCancellationRequested)
+        {
+            throw new TimeoutException("Selection read budget expired.");
+        }
+        finally
+        {
+            // End the actual provider operation too, not only the wait for
+            // it. Otherwise a timed-out PDF read can hold its PID slot and
+            // make later selections in the same browser look permanently dead.
+            selectionReadCancellation.Cancel();
         }
     }
 
@@ -276,7 +358,8 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
         ScreenPoint anchorPoint,
         AppSettings settings,
         RequestLease lease,
-        TranslationTrigger trigger)
+        TranslationTrigger trigger,
+        string? context = null)
     {
         var performance = _performanceMonitor.Begin(
             trigger,
@@ -288,7 +371,7 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
             outcome = await TranslateResolvedTextAsync(
                     lease.Version,
                     text,
-                    context: null,
+                    context,
                     settings.SourceLanguage,
                     targetLanguage,
                     anchorPoint,
@@ -1543,6 +1626,17 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
                     cancellation.Dispose();
                 }
             }
+        }
+    }
+
+    private void StorePendingSelection(string text, string? context, ScreenPoint anchor)
+    {
+        lock (_pendingSelectionSync)
+        {
+            _pendingSelectionText = text;
+            _pendingSelectionContext = context;
+            _pendingSelectionAnchor = anchor;
+            _hasPendingSelection = true;
         }
     }
 

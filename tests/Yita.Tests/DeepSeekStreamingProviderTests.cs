@@ -252,8 +252,8 @@ public sealed class DeepSeekStreamingProviderTests
 
         Assert.Contains("semantic precision", systemPrompt, StringComparison.Ordinal);
         Assert.Contains("technical prose", systemPrompt, StringComparison.Ordinal);
-        Assert.Contains("Presentation emphasis is required", systemPrompt, StringComparison.Ordinal);
-        Assert.Contains("[[h1:phrase]]", systemPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("Presentation emphasis is required", systemPrompt, StringComparison.Ordinal);
+        Assert.DoesNotContain("[[h1:phrase]]", systemPrompt, StringComparison.Ordinal);
         Assert.Equal("bank", userContent.RootElement.GetProperty("text").GetString());
         Assert.Equal(
             "The canoe reached the river bank.",

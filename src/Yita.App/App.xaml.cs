@@ -195,6 +195,7 @@ public partial class App : System.Windows.Application
 
             _hotkeyManager = new GlobalHotkeyManager();
             _hotkeyManager.TranslateClipboardRequested += TranslateClipboard;
+            _hotkeyManager.TranslateSelectionRequested += TranslatePendingSelection;
             _hotkeyManager.HotkeyStoppedUnexpectedly += OnHotkeyStoppedUnexpectedly;
             try
             {
@@ -206,12 +207,20 @@ public partial class App : System.Windows.Application
                 _healthJournal.Record(RuntimeHealthEvent.HotkeyRegistrationFailed, exception);
                 System.Diagnostics.Debug.WriteLine($"Yita hotkey registration failed: {exception}");
                 _hotkeyManager.TranslateClipboardRequested -= TranslateClipboard;
+                _hotkeyManager.TranslateSelectionRequested -= TranslatePendingSelection;
                 _hotkeyManager.HotkeyStoppedUnexpectedly -= OnHotkeyStoppedUnexpectedly;
                 _hotkeyManager.Dispose();
                 _hotkeyManager = null;
                 _trayIcon.ShowError(L(
                     "Could not register Ctrl+Shift+T. Another app may already use it.",
                     "无法注册 Ctrl+Shift+T，可能已被其他程序占用。"));
+            }
+
+            if (_hotkeyManager is not null && !_hotkeyManager.IsSelectionHotkeyRegistered)
+            {
+                _trayIcon.ShowError(L(
+                    "Could not register Ctrl+Shift+D. Another app may already use it, so the selection translation hotkey is unavailable.",
+                    "无法注册 Ctrl+Shift+D，可能已被其他程序占用，划词翻译快捷键不可用。"));
             }
 
             if (!isVisualTest)
@@ -273,12 +282,14 @@ public partial class App : System.Windows.Application
                 if (previous is not null)
                 {
                     previous.TranslateClipboardRequested -= TranslateClipboard;
+                    previous.TranslateSelectionRequested -= TranslatePendingSelection;
                     previous.HotkeyStoppedUnexpectedly -= OnHotkeyStoppedUnexpectedly;
                     previous.Dispose();
                 }
 
                 var replacement = new GlobalHotkeyManager();
                 replacement.TranslateClipboardRequested += TranslateClipboard;
+                replacement.TranslateSelectionRequested += TranslatePendingSelection;
                 replacement.HotkeyStoppedUnexpectedly += OnHotkeyStoppedUnexpectedly;
                 try
                 {
@@ -289,10 +300,18 @@ public partial class App : System.Windows.Application
                 catch (Exception exception)
                 {
                     replacement.TranslateClipboardRequested -= TranslateClipboard;
+                    replacement.TranslateSelectionRequested -= TranslatePendingSelection;
                     replacement.HotkeyStoppedUnexpectedly -= OnHotkeyStoppedUnexpectedly;
                     replacement.Dispose();
                     _hotkeyManager = null;
                     _healthJournal.Record(RuntimeHealthEvent.HotkeyRegistrationFailed, exception);
+                }
+
+                if (_hotkeyManager is not null && !_hotkeyManager.IsSelectionHotkeyRegistered)
+                {
+                    _trayIcon?.ShowError(L(
+                        "Could not register Ctrl+Shift+D. Another app may already use it.",
+                        "无法注册 Ctrl+Shift+D，可能已被其他程序占用。"));
                 }
             },
             DispatcherPriority.Send);
@@ -1561,6 +1580,29 @@ public partial class App : System.Windows.Application
             DispatcherPriority.Send);
     }
 
+    private void TranslatePendingSelection()
+    {
+        Dispatcher.BeginInvoke(
+            async () =>
+            {
+                if (_isExiting || !_settings.IsEnabled || _coordinator is null)
+                {
+                    return;
+                }
+
+                var translated = await _coordinator.TranslatePendingSelectionAsync();
+                if (!translated)
+                {
+                    _trayIcon?.ShowInfo(
+                        "Yita",
+                        L(
+                            "Select text first, then press Ctrl+Shift+D to translate.",
+                            "请先划选文字，再按 Ctrl+Shift+D 翻译。"));
+                }
+            },
+            DispatcherPriority.Send);
+    }
+
     private void OnZoteroSelectionReceived(string text)
     {
         Dispatcher.BeginInvoke(
@@ -1860,6 +1902,7 @@ public partial class App : System.Windows.Application
         if (_hotkeyManager is not null)
         {
             _hotkeyManager.TranslateClipboardRequested -= TranslateClipboard;
+            _hotkeyManager.TranslateSelectionRequested -= TranslatePendingSelection;
             _hotkeyManager.HotkeyStoppedUnexpectedly -= OnHotkeyStoppedUnexpectedly;
             _hotkeyManager.Dispose();
             _hotkeyManager = null;

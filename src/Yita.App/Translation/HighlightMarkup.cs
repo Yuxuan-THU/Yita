@@ -174,6 +174,7 @@ internal static class HighlightMarkup
     internal const string PromptInstruction = """
         Presentation emphasis is required for every non-empty response: mark one to three genuinely important short phrases with [[h1:phrase]], [[h2:phrase]], or [[h3:phrase]].
         Use at least one marker, and use two or three when the response contains multiple distinct key ideas.
+        Place every marker inline at the phrase's original position inside the translated text. Never move marked phrases to the end of the response, and never append a separate list, glossary, or summary of key terms after the translation.
         Keep the exact wording inside each marker, do not nest markers, do not span a line break, and do not mark an entire sentence or paragraph.
         These markers are display-only metadata: do not explain them, do not use Markdown, and never copy marker-like text from the input unless you intentionally add it as emphasis.
         """;

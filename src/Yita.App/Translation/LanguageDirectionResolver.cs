@@ -16,19 +16,24 @@ internal static class LanguageDirectionResolver
             return settings.TargetLanguage;
         }
 
-        var hasChinese = false;
-        var hasEnglish = false;
+        var chineseCount = 0;
+        var englishCount = 0;
         foreach (var rune in sourceText.EnumerateRunes())
         {
-            hasChinese |= IsCjkIdeograph(rune.Value);
-            hasEnglish |= rune.Value is >= 'A' and <= 'Z' or >= 'a' and <= 'z';
-            if (hasChinese && hasEnglish)
+            if (IsCjkIdeograph(rune.Value))
             {
-                return Chinese;
+                chineseCount++;
+            }
+            else if (rune.Value is >= 'A' and <= 'Z' or >= 'a' and <= 'z')
+            {
+                englishCount++;
             }
         }
 
-        return hasChinese ? English : Chinese;
+        // Translate into the opposite of the dominant language. A
+        // Chinese-dominant selection becomes English; anything else stays
+        // Simplified Chinese.
+        return chineseCount > englishCount ? English : Chinese;
     }
 
     public static string GetOppositeTarget(string currentTarget)
