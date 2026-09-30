@@ -14,7 +14,6 @@ namespace Yita.Services;
 internal sealed class SelectionTranslationCoordinator : IDisposable
 {
     private static readonly TimeSpan SelectionReadTimeout = TimeSpan.FromMilliseconds(4000);
-    private static readonly TimeSpan PendingSelectionWaitTimeout = TimeSpan.FromSeconds(5);
     private static readonly TimeSpan TranslationTimeout = TimeSpan.FromSeconds(60);
     private static readonly TimeSpan FirstContentTimeout = TimeSpan.FromSeconds(20);
     private static readonly TimeSpan StreamIdleTimeout = TimeSpan.FromSeconds(15);
@@ -47,12 +46,9 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
     private readonly Dictionary<long, CancellationTokenSource> _retranslations = new();
     private readonly Dictionary<long, CancellationTokenSource> _detachedSelections = new();
     private readonly HashSet<long> _runningSelections = new();
-    private readonly object _pendingSelectionSync = new();
-    private string? _pendingSelectionText;
-    private string? _pendingSelectionContext;
-    private ScreenPoint _pendingSelectionAnchor;
-    private bool _hasPendingSelection;
-    private Task _selectionCapture = Task.CompletedTask;
+    private readonly object _pendingGestureSync = new();
+    private SelectionGesture _pendingGesture;
+    private bool _hasPendingGesture;
     private bool _disposed;
 
     public SelectionTranslationCoordinator(
@@ -122,9 +118,9 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
     }
 
     /// <summary>
-    /// Translates the most recently captured mouse selection, waiting briefly
-    /// for an in-flight selection capture when the user presses the hotkey
-    /// immediately after releasing the mouse.
+    /// Translates the selection the user made with the mouse. The selection is
+    /// only read when this method is called (when the user presses
+    /// Ctrl+Shift+D), so ordinary copy/paste never touches the clipboard.
     /// </summary>
     public async Task<bool> TranslatePendingSelectionAsync()
     {
@@ -133,68 +129,63 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
             return false;
         }
 
-        if (TryConsumePendingSelection(out var text, out var context, out var anchor))
+        SelectionGesture gesture;
+        lock (_pendingGestureSync)
         {
-            StartPendingTranslation(text, context, anchor);
-            return true;
-        }
-
-        var capture = _selectionCapture;
-        if (!capture.IsCompleted)
-        {
-            try
+            if (!_hasPendingGesture)
             {
-                await capture.WaitAsync(PendingSelectionWaitTimeout).ConfigureAwait(false);
-            }
-            catch (Exception)
-            {
-                // Capture failures are already logged inside CaptureSelectionAsync.
-            }
-        }
-
-        if (TryConsumePendingSelection(out text, out context, out anchor))
-        {
-            StartPendingTranslation(text, context, anchor);
-            return true;
-        }
-
-        return false;
-    }
-
-    private bool TryConsumePendingSelection(out string text, out string? context, out ScreenPoint anchor)
-    {
-        lock (_pendingSelectionSync)
-        {
-            if (!_hasPendingSelection || string.IsNullOrWhiteSpace(_pendingSelectionText))
-            {
-                text = string.Empty;
-                context = null;
-                anchor = default;
                 return false;
             }
 
-            text = _pendingSelectionText;
-            context = _pendingSelectionContext;
-            anchor = _pendingSelectionAnchor;
-            _hasPendingSelection = false;
-            _pendingSelectionText = null;
-            _pendingSelectionContext = null;
-            _pendingSelectionAnchor = default;
-            return true;
+            gesture = _pendingGesture;
+            _hasPendingGesture = false;
+            _pendingGesture = default;
         }
-    }
 
-    private void StartPendingTranslation(string text, string? context, ScreenPoint anchor)
-    {
+        var settings = _getSettings();
         var lease = _requestGate.BeginRequest();
         TrackSelection(lease.Version);
+
+        SelectionCapture? capture;
+        try
+        {
+            capture = await ReadSelectionCaptureAsync(
+                    gesture,
+                    settings,
+                    lease.CancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) when (lease.CancellationToken.IsCancellationRequested)
+        {
+            capture = null;
+        }
+        catch (Exception exception)
+        {
+            Debug.WriteLine($"Yita selection read failed: {exception}");
+            capture = null;
+        }
+
+        if (!_requestGate.IsCurrent(lease.Version))
+        {
+            CompleteSelection(lease.Version);
+            return false;
+        }
+
+        var selectedText = capture?.Text;
+        if (string.IsNullOrWhiteSpace(selectedText))
+        {
+            CompleteSelection(lease.Version);
+            return false;
+        }
+
         _ = ProcessExplicitTextAsync(
-            text,
-            anchor,
-            _getSettings(),
+            selectedText,
+            gesture.PopupAnchor,
+            settings,
             lease,
             TranslationTrigger.Selection,
-            context);
+            capture?.Context);
+        return true;
     }
 
     private void OnSelectionGestureCompleted(SelectionGesture gesture)
@@ -235,46 +226,10 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
             return;
         }
 
-        var lease = _requestGate.BeginRequest();
-        TrackSelection(lease.Version);
-        _selectionCapture = CaptureSelectionAsync(gesture, settings, lease);
-    }
-
-    private async Task CaptureSelectionAsync(
-        SelectionGesture gesture,
-        AppSettings settings,
-        RequestLease lease)
-    {
-        try
+        lock (_pendingGestureSync)
         {
-            var capture = await ReadSelectionCaptureAsync(
-                    gesture,
-                    settings,
-                    lease.CancellationToken)
-                .ConfigureAwait(false);
-            if (!_requestGate.IsCurrent(lease.Version))
-            {
-                return;
-            }
-
-            var selectedText = capture?.Text;
-            if (string.IsNullOrWhiteSpace(selectedText))
-            {
-                return;
-            }
-
-            StorePendingSelection(selectedText, capture?.Context, gesture.PopupAnchor);
-        }
-        catch (OperationCanceledException) when (lease.CancellationToken.IsCancellationRequested)
-        {
-        }
-        catch (Exception exception)
-        {
-            Debug.WriteLine($"Yita selection capture failed: {exception}");
-        }
-        finally
-        {
-            CompleteSelection(lease.Version);
+            _pendingGesture = gesture;
+            _hasPendingGesture = true;
         }
     }
 
@@ -1626,17 +1581,6 @@ internal sealed class SelectionTranslationCoordinator : IDisposable
                     cancellation.Dispose();
                 }
             }
-        }
-    }
-
-    private void StorePendingSelection(string text, string? context, ScreenPoint anchor)
-    {
-        lock (_pendingSelectionSync)
-        {
-            _pendingSelectionText = text;
-            _pendingSelectionContext = context;
-            _pendingSelectionAnchor = anchor;
-            _hasPendingSelection = true;
         }
     }
 
