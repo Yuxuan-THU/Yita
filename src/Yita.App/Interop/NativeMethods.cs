@@ -254,6 +254,16 @@ internal static class NativeMethods
     [DllImport("user32.dll")]
     internal static extern short GetAsyncKeyState(int virtualKey);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    internal static extern bool SetProcessWorkingSetSize(
+        IntPtr processHandle,
+        IntPtr minimumWorkingSetSize,
+        IntPtr maximumWorkingSetSize);
+
+    [DllImport("kernel32.dll")]
+    internal static extern IntPtr GetCurrentProcess();
+
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     internal static extern IntPtr SetWindowLongPtr(IntPtr windowHandle, int index, IntPtr newValue);
 

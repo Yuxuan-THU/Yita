@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.8.6 - 2026-10-04
+
+- Shrink the resident memory footprint while the app sits idle. A low-frequency
+  check trims the process working set after five minutes without any popup
+  activity; trimmed pages fault back automatically on the next interaction.
+- The resident cost is dominated by the WPF composition stack for transparent
+  popup surfaces, which the garbage collector cannot reclaim: the managed heap
+  stays bounded at roughly 14 MB while the working set sits near 600 MB.
+- No visible behavior changes; translation, popup interaction and settings are
+  unaffected by the trim.
+
 ## 0.8.5 - 2026-10-04
 
 - Keep the translation readable whenever it gets selected. Popup selection

@@ -1,3 +1,5 @@
+using System.Windows.Threading;
+using Yita.Interop;
 using Yita.Models;
 using Yita.Services;
 using Yita.Settings;
@@ -7,6 +9,13 @@ namespace Yita.Windows;
 
 internal sealed class PopupManager : IPopupPresenter, IDisposable
 {
+    // Once the WPF composition stack has rendered its first popup, the native
+    // side keeps a large resident cache that the garbage collector cannot
+    // reclaim. Trim the working set while no popup has been active for a
+    // while; pages fault back automatically on the next interaction.
+    private static readonly TimeSpan PopupIdleWorkingSetDelay = TimeSpan.FromMinutes(5);
+    private static readonly TimeSpan WorkingSetTrimInterval = TimeSpan.FromMinutes(5);
+
     private readonly Dictionary<long, PopupWindow> _windows = new();
     private readonly Dictionary<Guid, QuestionAnswerWindow> _questionWindows = new();
     private readonly Dictionary<Guid, QuestionContextSnapshot> _questionContexts = new();
@@ -16,6 +25,8 @@ internal sealed class PopupManager : IPopupPresenter, IDisposable
     private long? _transientRequestId;
     private bool _disposing;
     private readonly PopupPlacementStore _placementStore = new();
+    private DispatcherTimer? _workingSetTrimTimer;
+    private DateTimeOffset _lastPopupActivityUtc = DateTimeOffset.UtcNow;
 
     public PopupManager(
         Func<double>? getDefaultFontSize = null,
@@ -80,6 +91,7 @@ internal sealed class PopupManager : IPopupPresenter, IDisposable
         ScreenPoint anchorPoint,
         string sourceLanguage = "自动检测")
     {
+        MarkPopupActivity();
         var window = GetOrCreateWindow(requestId);
         if (!window.IsPinned)
         {
@@ -97,6 +109,7 @@ internal sealed class PopupManager : IPopupPresenter, IDisposable
 
     public void FailRequest(long requestId, string? message = null)
     {
+        MarkPopupActivity();
         if (!_windows.TryGetValue(requestId, out var window))
         {
             return;
@@ -130,6 +143,7 @@ internal sealed class PopupManager : IPopupPresenter, IDisposable
 
     public void ShowExplanation(long requestId, string explanation)
     {
+        MarkPopupActivity();
         if (_windows.TryGetValue(requestId, out var window))
         {
             window.ShowExplanation(explanation);
@@ -162,6 +176,7 @@ internal sealed class PopupManager : IPopupPresenter, IDisposable
 
     public void ShowQuestionAnswer(Guid sessionId, string answer)
     {
+        MarkPopupActivity();
         if (_questionWindows.TryGetValue(sessionId, out var window))
         {
             window.UpdateAnswer(answer);
@@ -278,6 +293,7 @@ internal sealed class PopupManager : IPopupPresenter, IDisposable
         }
 
         _disposing = true;
+        StopWorkingSetTrimTimer();
         foreach (var window in _windows.Values.ToArray())
         {
             window.Close();
@@ -296,11 +312,11 @@ internal sealed class PopupManager : IPopupPresenter, IDisposable
 
     private PopupWindow GetOrCreateWindow(long requestId)
     {
+        MarkPopupActivity();
         if (_windows.TryGetValue(requestId, out var existing))
         {
             return existing;
         }
-
         var appearance = _getAppearanceSettings();
         var window = new PopupWindow(
             requestId,
@@ -335,6 +351,66 @@ internal sealed class PopupManager : IPopupPresenter, IDisposable
         if (_windows.TryGetValue(existingId, out var existingWindow) && !existingWindow.IsPinned)
         {
             existingWindow.Close();
+        }
+    }
+
+    private void MarkPopupActivity()
+    {
+        _lastPopupActivityUtc = DateTimeOffset.UtcNow;
+        if (_workingSetTrimTimer is not null || _disposing)
+        {
+            return;
+        }
+
+        var timer = new DispatcherTimer(
+            WorkingSetTrimInterval,
+            DispatcherPriority.Background,
+            WorkingSetTrimTimer_Tick,
+            Dispatcher.CurrentDispatcher);
+        _workingSetTrimTimer = timer;
+        timer.Start();
+    }
+
+    private void WorkingSetTrimTimer_Tick(object? sender, EventArgs e)
+    {
+        if (_disposing)
+        {
+            StopWorkingSetTrimTimer();
+            return;
+        }
+
+        if (DateTimeOffset.UtcNow - _lastPopupActivityUtc < PopupIdleWorkingSetDelay)
+        {
+            return;
+        }
+
+        TrimCurrentProcessWorkingSet();
+    }
+
+    private void StopWorkingSetTrimTimer()
+    {
+        if (_workingSetTrimTimer is null)
+        {
+            return;
+        }
+
+        _workingSetTrimTimer.Stop();
+        _workingSetTrimTimer.Tick -= WorkingSetTrimTimer_Tick;
+        _workingSetTrimTimer = null;
+    }
+
+    private static void TrimCurrentProcessWorkingSet()
+    {
+        try
+        {
+            NativeMethods.SetProcessWorkingSetSize(
+                NativeMethods.GetCurrentProcess(),
+                new IntPtr(-1),
+                new IntPtr(-1));
+        }
+        catch (Exception exception) when (exception is not OutOfMemoryException)
+        {
+            // Best-effort housekeeping; never let a trim failure affect the app.
         }
     }
 
