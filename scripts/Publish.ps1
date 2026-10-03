@@ -1,6 +1,6 @@
 param(
     [ValidatePattern('^\d+\.\d+\.\d+$')]
-    [string]$Version = '0.8.6',
+    [string]$Version = '0.8.7',
 
     [string]$CertificateThumbprint = '',
 

@@ -1,5 +1,24 @@
 # Changelog
 
+## 0.8.7 - 2026-10-04
+
+- Render reading text as one WPF paragraph per original paragraph. When the
+  source contains line breaks, the popup now shows visible spacing between
+  paragraphs in both the translation and the source view instead of a bare
+  line break, making multi-paragraph content easier to scan.
+- Auto-size accounts for the paragraph spacing so long multi-paragraph
+  selections keep their last line above the rounded rim.
+- Saved corrections normalize the paragraph breaks WPF reports for
+  multi-paragraph documents, so an unedited correction is no longer treated
+  as a change to translation memory.
+
+### Validation and limitations
+
+- Verified with synthetic multi-paragraph selections and pixel-level capture:
+  both reading views show paragraph gaps, auto-size keeps the last line
+  visible, and copy, edit and save flows treat paragraph breaks as newlines.
+- The automated suite could not run in the authoring environment (see 0.8.5).
+
 ## 0.8.6 - 2026-10-04
 
 - Shrink the resident memory footprint while the app sits idle. A low-frequency

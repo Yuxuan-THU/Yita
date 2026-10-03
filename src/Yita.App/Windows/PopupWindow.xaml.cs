@@ -627,8 +627,13 @@ internal partial class PopupWindow : Window
     internal double TranslationFontSizeForVisualTest => TranslationRichTextBox.FontSize;
 
     internal bool HasContentHighlightsForVisualTest() =>
-        HighlightedTextRenderer.HasHighlightRuns(_translationParagraph)
+        HasHighlightRunsInDocument(TranslationRichTextBox.Document)
         || HighlightedTextRenderer.HasHighlightRuns(_explanationParagraph);
+
+    private static bool HasHighlightRunsInDocument(FlowDocument? document) =>
+        document is not null
+        && document.Blocks.OfType<Paragraph>()
+            .Any(paragraph => HighlightedTextRenderer.HasHighlightRuns(paragraph));
 
     internal bool HasVerticalOverflowForVisualTest()
     {
@@ -1298,15 +1303,8 @@ internal partial class PopupWindow : Window
         if (!force && _displayedSourceText == text) return;
         _displayedSourceText = text;
         var fontSize = SizePresetBar.FontSizeValue;
-        var paragraph = new Paragraph { Margin = new Thickness(0), LineHeight = CalculateLineHeight(fontSize) };
-        HighlightedTextRenderer.AppendTranslationRuns(paragraph, HighlightedText.FromPlainText(text),
-            _englishTranslationFont, _chineseTranslationFont);
-        SourceRichTextBox.Document = new FlowDocument(paragraph)
-        {
-            PagePadding = new Thickness(0), ColumnWidth = double.PositiveInfinity,
-            FontFamily = _englishTranslationFont, FontSize = fontSize,
-            Foreground = SourceRichTextBox.Foreground,
-        };
+        SourceRichTextBox.Document = BuildReadingDocument(
+            HighlightedText.FromPlainText(text), fontSize, SourceRichTextBox.Foreground);
         SourceViewButton.IsEnabled = text.Length > 0;
     }
 
@@ -1623,7 +1621,7 @@ internal partial class PopupWindow : Window
         var range = new TextRange(
             TranslationRichTextBox.Document.ContentStart,
             TranslationRichTextBox.Document.ContentEnd);
-        var correctedTranslation = range.Text.TrimEnd('\r', '\n');
+        var correctedTranslation = range.Text.Replace("\r\n", "\n").TrimEnd('\r', '\n');
         if (string.IsNullOrWhiteSpace(correctedTranslation))
         {
             ShowActionStatus(ActionMessageKind.CorrectionSaveFailed);
@@ -2028,6 +2026,16 @@ internal partial class PopupWindow : Window
         // Automatic mode owns the size. Recompute both directions as streaming
         // text grows or the view switches; manual resize/move exits this mode.
         var targetHeight = targetSize.Height + PopupSurfaceVerticalInset;
+        var paragraphBreakCount = 0;
+        foreach (var character in text)
+        {
+            if (character == '\n')
+            {
+                paragraphBreakCount++;
+            }
+        }
+
+        targetHeight += paragraphBreakCount * CalculateParagraphGap(SizePresetBar.FontSizeValue);
         var sizeChanged = Math.Abs(Width - targetWidth) > 0.5
                           || Math.Abs(Height - targetHeight) > 0.5;
         Width = targetWidth;
@@ -2088,30 +2096,11 @@ internal partial class PopupWindow : Window
             return;
         }
 
-        var paragraph = new Paragraph
-        {
-            Margin = new Thickness(0),
-            LineHeight = CalculateLineHeight(fontSize),
-        };
-
-        HighlightedTextRenderer.AppendTranslationRuns(
-            paragraph,
-            highlightedText,
-            _englishTranslationFont,
-            _chineseTranslationFont);
-
-        TranslationRichTextBox.Document = new FlowDocument(paragraph)
-        {
-            PagePadding = new Thickness(0),
-            ColumnWidth = double.PositiveInfinity,
-            ColumnGap = 0,
-            Background = System.Windows.Media.Brushes.Transparent,
-            Foreground = TranslationRichTextBox.Foreground,
-            FontFamily = _englishTranslationFont,
-            FontSize = fontSize,
-            TextAlignment = TextAlignment.Left,
-        };
-        _translationParagraph = paragraph;
+        var document = BuildReadingDocument(highlightedText, fontSize, TranslationRichTextBox.Foreground);
+        document.Background = System.Windows.Media.Brushes.Transparent;
+        document.TextAlignment = TextAlignment.Left;
+        TranslationRichTextBox.Document = document;
+        _translationParagraph = document.Blocks.OfType<Paragraph>().FirstOrDefault();
         _renderedTranslation = text;
         _renderedTranslationDocument = highlightedText;
         ApplyTranslationFontSize(fontSize);
@@ -2470,8 +2459,16 @@ internal partial class PopupWindow : Window
         {
             SourceRichTextBox.FontSize = fontSize;
             SourceRichTextBox.Document.FontSize = fontSize;
+            var sourceParagraphGap = CalculateParagraphGap(fontSize);
+            var isFirstSourceParagraph = true;
             foreach (var paragraph in SourceRichTextBox.Document.Blocks.OfType<Paragraph>())
+            {
                 paragraph.LineHeight = CalculateLineHeight(fontSize);
+                paragraph.Margin = isFirstSourceParagraph
+                    ? new Thickness(0)
+                    : new Thickness(0, sourceParagraphGap, 0, 0);
+                isFirstSourceParagraph = false;
+            }
         }
         if (TranslationRichTextBox.Document is not { } document)
         {
@@ -2480,11 +2477,17 @@ internal partial class PopupWindow : Window
 
         document.FontSize = fontSize;
         var lineHeight = CalculateLineHeight(fontSize);
+        var paragraphGap = CalculateParagraphGap(fontSize);
+        var isFirstParagraph = true;
         foreach (var block in document.Blocks)
         {
             if (block is Paragraph paragraph)
             {
                 paragraph.LineHeight = lineHeight;
+                paragraph.Margin = isFirstParagraph
+                    ? new Thickness(0)
+                    : new Thickness(0, paragraphGap, 0, 0);
+                isFirstParagraph = false;
             }
         }
 
@@ -2522,6 +2525,62 @@ internal partial class PopupWindow : Window
         return Math.Round(fontSize * 1.55, 2);
     }
 
+    private static double CalculateParagraphGap(double fontSize)
+    {
+        return Math.Round(fontSize * 0.65, 2);
+    }
+
+    /// <summary>
+    /// Renders reading text as one WPF paragraph per original paragraph so a
+    /// line break in the source gains visible spacing between sections in the
+    /// popup, in both the translation and the source view.
+    /// </summary>
+    private FlowDocument BuildReadingDocument(
+        HighlightedText highlightedText,
+        double fontSize,
+        System.Windows.Media.Brush foreground)
+    {
+        var lineHeight = CalculateLineHeight(fontSize);
+        var paragraphGap = CalculateParagraphGap(fontSize);
+        var document = new FlowDocument
+        {
+            PagePadding = new Thickness(0),
+            ColumnWidth = double.PositiveInfinity,
+            ColumnGap = 0,
+            FontFamily = _englishTranslationFont,
+            FontSize = fontSize,
+            Foreground = foreground,
+        };
+
+        var isFirstParagraph = true;
+        foreach (var paragraphText in highlightedText.SplitIntoParagraphs())
+        {
+            var paragraph = new Paragraph
+            {
+                Margin = isFirstParagraph
+                    ? new Thickness(0)
+                    : new Thickness(0, paragraphGap, 0, 0),
+                LineHeight = lineHeight,
+            };
+
+            HighlightedTextRenderer.AppendTranslationRuns(
+                paragraph,
+                paragraphText,
+                _englishTranslationFont,
+                _chineseTranslationFont);
+            document.Blocks.Add(paragraph);
+            isFirstParagraph = false;
+        }
+
+        if (isFirstParagraph)
+        {
+            // Keep at least one paragraph so selection and editing still work.
+            document.Blocks.Add(new Paragraph { Margin = new Thickness(0), LineHeight = lineHeight });
+        }
+
+        return document;
+    }
+
     private void TranslationRichTextBox_PreviewMouseLeftButtonDown(object sender, MouseButtonEventArgs e)
     {
         HideSelectionExplainButton();
@@ -2535,30 +2594,47 @@ internal partial class PopupWindow : Window
 
     private TextPointer? GetTranslationPointerAtOffset(int characterOffset)
     {
-        if (_translationParagraph is null)
+        var document = TranslationRichTextBox.Document;
+        if (document is null)
         {
             return null;
         }
 
-        var remaining = characterOffset;
-        foreach (var inline in _translationParagraph.Inlines)
+        // Multi-paragraph rendering consumes the separating newlines as
+        // paragraph structure, so skip one character per paragraph boundary
+        // while walking the caller's plain-text offset.
+        var remaining = Math.Max(0, characterOffset);
+        foreach (var block in document.Blocks)
         {
-            if (inline is not Run run)
+            if (block is not Paragraph paragraph)
             {
                 continue;
             }
 
-            var runLength = run.Text.Length;
-            if (remaining <= runLength)
+            foreach (var inline in paragraph.Inlines)
             {
-                return run.ContentStart.GetPositionAtOffset(remaining, LogicalDirection.Forward)
-                    ?? run.ContentEnd;
+                if (inline is not Run run)
+                {
+                    continue;
+                }
+
+                var runLength = run.Text.Length;
+                if (remaining <= runLength)
+                {
+                    return run.ContentStart.GetPositionAtOffset(remaining, LogicalDirection.Forward)
+                        ?? run.ContentEnd;
+                }
+
+                remaining -= runLength;
             }
 
-            remaining -= runLength;
+            if (remaining > 0)
+            {
+                remaining -= 1;
+            }
         }
 
-        return _translationParagraph.ContentEnd;
+        return document.ContentEnd;
     }
 
     private void PopupWindow_SizeChanged(object sender, SizeChangedEventArgs e)

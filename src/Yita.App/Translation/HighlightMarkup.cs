@@ -74,6 +74,58 @@ internal sealed class HighlightedText
         return Create(PlainText[..requestedLength], segments);
     }
 
+    /// <summary>
+    /// Splits the text at line breaks so each rendered paragraph can carry its
+    /// own spacing. The separating newline characters are consumed here and
+    /// become paragraph structure instead of rendered text.
+    /// </summary>
+    internal IReadOnlyList<HighlightedText> SplitIntoParagraphs()
+    {
+        var paragraphs = new List<HighlightedText>();
+        var plainText = new System.Text.StringBuilder();
+        var segments = new List<HighlightedTextSegment>();
+
+        void CloseParagraph()
+        {
+            paragraphs.Add(Create(plainText.ToString(), segments));
+            plainText.Clear();
+            segments.Clear();
+        }
+
+        foreach (var segment in _segments)
+        {
+            var start = 0;
+            while (start < segment.Text.Length)
+            {
+                var newlineIndex = segment.Text.IndexOf('\n', start);
+                var part = newlineIndex < 0
+                    ? segment.Text[start..]
+                    : segment.Text[start..newlineIndex];
+                part = part.TrimEnd('\r');
+                if (part.Length > 0)
+                {
+                    plainText.Append(part);
+                    AddSegment(segments, part, segment.Kind);
+                }
+
+                if (newlineIndex < 0)
+                {
+                    break;
+                }
+
+                CloseParagraph();
+                start = newlineIndex + 1;
+            }
+        }
+
+        if (plainText.Length > 0 || segments.Count > 0 || paragraphs.Count == 0)
+        {
+            CloseParagraph();
+        }
+
+        return paragraphs;
+    }
+
     internal bool HasSamePresentation(HighlightedText? other)
     {
         if (other is null
