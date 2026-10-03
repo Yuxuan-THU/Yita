@@ -1,6 +1,6 @@
 [CmdletBinding()]
 param(
-    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.8.4',
+    [ValidatePattern('^\d+\.\d+\.\d+$')][string]$Version = '0.8.5',
     [string]$DotnetRoot = '',
     [string]$InnoCompiler = '',
     [switch]$SkipTests

@@ -43,6 +43,7 @@ internal static class NativeMethods
     internal const int HtBorder = 18;
     internal const int GwlStyle = -16;
     internal const int GwlExStyle = -20;
+    internal const int VirtualKeyLeftButton = 0x01;
     internal const long EsPassword = 0x00000020L;
     internal const long WsExTransparent = 0x00000020L;
     internal const long WsExToolWindow = 0x00000080L;
@@ -249,6 +250,9 @@ internal static class NativeMethods
 
     [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
     internal static extern IntPtr GetWindowLongPtr(IntPtr windowHandle, int index);
+
+    [DllImport("user32.dll")]
+    internal static extern short GetAsyncKeyState(int virtualKey);
 
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
     internal static extern IntPtr SetWindowLongPtr(IntPtr windowHandle, int index, IntPtr newValue);

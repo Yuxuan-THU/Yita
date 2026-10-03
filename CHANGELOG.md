@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.8.5 - 2026-10-04
+
+- Keep the translation readable whenever it gets selected. Popup selection
+  highlight opacity drops from fully opaque to 0.4 and selection no longer
+  repaints glyphs with the accent text color, so a drag that lands on the
+  popup can no longer cover the reading surface with a solid accent block.
+- Stay click-through while a popup appears during an in-progress pointer
+  drag: the window ignores mouse input until the physical left button is
+  released, as a defense against the popup capturing the tail of a gesture.
+- Offer `deepseek-flash` next to the existing model presets, matching the
+  model identifiers currently returned by the DeepSeek API.
+
+### Validation and limitations
+
+- Behavior was verified with synthetic pointer input and pixel-level capture:
+  dragging across a completed popup keeps the reading surface visible, and an
+  active selection blends the accent at 40% opacity over the ivory surface.
+- The click-through guard is defensive. Implicit mouse capture normally keeps
+  an in-progress drag on the source window, so the guard is not expected to
+  fire in every drag scenario.
+- The automated suite could not run in the authoring environment because the
+  test host cannot open its parent process handle there; the solution builds
+  with zero warnings and zero errors.
+
 ## 0.8.4 - 2026-09-27
 
 - 根据译文内容自适应浮窗宽高，减少长文本被圆角边缘遮挡，并移除译文高亮背景与加粗样式。

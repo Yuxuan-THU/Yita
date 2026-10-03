@@ -1,5 +1,5 @@
 #ifndef AppVersion
-  #define AppVersion "0.8.4"
+  #define AppVersion "0.8.5"
 #endif
 #ifndef PayloadDir
   #error PayloadDir must point to the self-contained win-x64 publish output.

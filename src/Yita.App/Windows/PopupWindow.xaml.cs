@@ -139,6 +139,7 @@ internal partial class PopupWindow : Window
         ApplyUiLanguage(uiLanguage);
         SourceViewButton.IsEnabled = false;
         SourceInitialized += OnSourceInitialized;
+        IsVisibleChanged += PopupWindow_IsVisibleChanged;
     }
 
     public long RequestId { get; }
@@ -683,6 +684,7 @@ internal partial class PopupWindow : Window
         ScreenPoint anchorPoint,
         string sourceLanguage = "自动检测")
     {
+        BeginMouseDragGuardIfNeeded();
         HideSelectionExplainButton();
         var highlightedTranslation = HighlightMarkup.EnsureEmphasis(HighlightMarkup.Parse(translatedText));
         var plainTranslation = highlightedTranslation.PlainText;
@@ -1015,6 +1017,7 @@ internal partial class PopupWindow : Window
         _lastExplanationInvocation = null;
         _isExplanationVisible = false;
         _lastCompletedTranslation = null;
+        StopMouseDragGuard();
         _windowHandle = IntPtr.Zero;
         base.OnClosed(e);
         _lifetimeCancellation.Dispose();
@@ -1063,6 +1066,84 @@ internal partial class PopupWindow : Window
             _windowHandle,
             NativeMethods.GwlExStyle,
             new IntPtr(requiredStyles));
+    }
+
+    private bool _isClickThroughActive;
+    private DispatcherTimer? _mouseDragGuardTimer;
+
+    private void PopupWindow_IsVisibleChanged(object sender, DependencyPropertyChangedEventArgs e)
+    {
+        if (e.NewValue is not true)
+        {
+            return;
+        }
+
+        BeginMouseDragGuardIfNeeded();
+    }
+
+    /// <summary>
+    /// A popup can appear under the pointer while the user is still dragging a
+    /// selection in the source application. The remaining drag then lands on
+    /// this window, selects the rendered translation, and the opaque accent
+    /// selection hides the text. Stay click-through until the physical left
+    /// button is released so the drag keeps reaching the source application.
+    /// </summary>
+    private void BeginMouseDragGuardIfNeeded()
+    {
+        if (_mouseDragGuardTimer is not null || _isClickThroughActive)
+        {
+            return;
+        }
+
+        if ((NativeMethods.GetAsyncKeyState(NativeMethods.VirtualKeyLeftButton) & 0x8000) == 0)
+        {
+            return;
+        }
+
+        SetClickThrough(isActive: true);
+        _mouseDragGuardTimer = new DispatcherTimer(
+            TimeSpan.FromMilliseconds(50),
+            DispatcherPriority.Input,
+            MouseDragGuardTimer_Tick,
+            Dispatcher);
+        _mouseDragGuardTimer.Start();
+    }
+
+    private void MouseDragGuardTimer_Tick(object? sender, EventArgs e)
+    {
+        if ((NativeMethods.GetAsyncKeyState(NativeMethods.VirtualKeyLeftButton) & 0x8000) != 0)
+        {
+            return;
+        }
+
+        StopMouseDragGuard();
+    }
+
+    private void StopMouseDragGuard()
+    {
+        if (_mouseDragGuardTimer is not null)
+        {
+            _mouseDragGuardTimer.Stop();
+            _mouseDragGuardTimer.Tick -= MouseDragGuardTimer_Tick;
+            _mouseDragGuardTimer = null;
+        }
+
+        SetClickThrough(isActive: false);
+    }
+
+    private void SetClickThrough(bool isActive)
+    {
+        if (_isClickThroughActive == isActive || _windowHandle == IntPtr.Zero)
+        {
+            return;
+        }
+
+        var styles = NativeMethods.GetWindowLongPtr(_windowHandle, NativeMethods.GwlExStyle).ToInt64();
+        styles = isActive
+            ? styles | NativeMethods.WsExTransparent
+            : styles & ~NativeMethods.WsExTransparent;
+        NativeMethods.SetWindowLongPtr(_windowHandle, NativeMethods.GwlExStyle, new IntPtr(styles));
+        _isClickThroughActive = isActive;
     }
 
     private IntPtr WindowProcedure(IntPtr windowHandle, int message, IntPtr wParam, IntPtr lParam, ref bool handled)

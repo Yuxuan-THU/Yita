@@ -1218,6 +1218,7 @@
                                            Tag="loc:Model"
                                            Text="Model" />
                                 <ComboBox x:Name="ModelComboBox" IsEditable="True">
+                                    <ComboBoxItem Content="deepseek-flash" />
                                     <ComboBoxItem Content="deepseek-v4-flash" />
                                     <ComboBoxItem Content="deepseek-v4-pro" />
                                 </ComboBox>
